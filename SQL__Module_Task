@@ -1,0 +1,193 @@
+-- 1. Dane o kontach
+WITH account_data AS (
+  SELECT
+    a.id AS account_id,
+    a.send_interval,
+    a.is_verified,
+    a.is_unsubscribed,
+    MIN(s.date) AS created_at,
+    ANY_VALUE(sp.country) AS country
+  FROM `data-analytics-mate.DA.account` a
+  JOIN `DA.account_session` acs 
+  ON acs.account_id = a.id
+  JOIN `DA.session_params` sp 
+  ON sp.ga_session_id = acs.ga_session_id
+  JOIN `DA.session` s 
+  ON s.ga_session_id = acs.ga_session_id
+  GROUP BY a.id, a.send_interval, a.is_verified, a.is_unsubscribed
+
+),
+
+
+-- 2. Dane o e-mailach
+email_data AS (
+  SELECT
+    es.id_account AS account_id,
+    COUNT(DISTINCT es.id_message) AS sent_msg,
+    COUNT(DISTINCT eo.id_message) AS open_msg,
+    COUNT(DISTINCT ev.id_message) AS visit_msg,
+    DATE_ADD(IFNULL(s.date, DATE '2000-01-01'), INTERVAL es.sent_date DAY) AS sent_date,
+    ANY_VALUE(sp.country) AS country
+  FROM `data-analytics-mate.DA.email_sent` es
+  LEFT JOIN `DA.email_open` eo 
+  ON eo.id_message = es.id_message
+  LEFT JOIN `DA.email_visit` ev 
+  ON ev.id_message = es.id_message
+  LEFT JOIN `DA.account_session` acs
+   ON acs.account_id = es.id_account
+  LEFT JOIN `DA.session` s
+   ON s.ga_session_id = acs.ga_session_id
+  LEFT JOIN `DA.session_params` sp 
+  ON sp.ga_session_id = acs.ga_session_id
+  WHERE es.sent_date IS NOT NULL
+  GROUP BY 1,5
+
+),
+
+-- 3. Statystyki kont
+account_stats_base AS (
+  SELECT
+   DATE(created_at) AS date,
+    country,
+    send_interval,
+    is_verified,
+    is_unsubscribed,
+    COUNT(DISTINCT account_id) AS account_cnt
+  FROM account_data
+  GROUP BY date, country, send_interval, is_verified, is_unsubscribed
+),
+
+country_totals_account AS (
+  SELECT
+    country,
+    SUM(account_cnt) AS total_country_account_cnt
+  FROM account_stats_base
+  GROUP BY country
+),
+
+ranked_country_account AS (
+  SELECT
+    country,
+    total_country_account_cnt,
+    RANK() OVER (ORDER BY total_country_account_cnt DESC) AS rank_total_country_account_cnt
+  FROM country_totals_account
+),
+
+account_stats AS (
+  SELECT
+    ab.date,
+    ab.country,
+    ab.send_interval,
+    ab.is_verified,
+    ab.is_unsubscribed,
+    ab.account_cnt,
+    ct.total_country_account_cnt,
+    rc.rank_total_country_account_cnt,
+    0 AS sent_msg,
+    0 AS open_msg,
+    0 AS visit_msg,
+    0 AS total_country_sent_cnt,
+    NULL AS rank_total_country_sent_cnt
+  FROM account_stats_base ab
+  JOIN country_totals_account ct ON ab.country = ct.country
+  JOIN ranked_country_account rc ON ab.country = rc.country
+),
+
+-- 4. Statystyki e-maili
+email_stats_base AS (
+  SELECT
+    DATE(e.sent_date) AS date,
+    a.country,
+    a.send_interval,
+    a.is_verified,
+    a.is_unsubscribed,
+    SUM(e.sent_msg) AS sent_msg,
+    SUM(e.open_msg) AS open_msg,
+    SUM(e.visit_msg) AS visit_msg
+
+  FROM email_data e
+  JOIN account_data a 
+  ON e.account_id = a.account_id
+  GROUP BY date, a.country, a.send_interval, a.is_verified, a.is_unsubscribed
+),
+
+country_totals_email AS (
+  SELECT
+    country,
+    SUM(sent_msg) AS total_country_sent_cnt
+  FROM email_stats_base
+  GROUP BY country
+),
+
+ranked_country_email AS (
+  SELECT
+    country,
+    total_country_sent_cnt,
+    RANK() OVER (ORDER BY total_country_sent_cnt DESC) AS rank_total_country_sent_cnt
+  FROM country_totals_email
+),
+
+email_stats AS (
+  SELECT
+    eb.date,
+    eb.country,
+    eb.send_interval,
+    eb.is_verified,
+    eb.is_unsubscribed,
+    0 AS account_cnt,
+    eb.sent_msg,
+    eb.open_msg,
+    eb.visit_msg,
+    ct.total_country_sent_cnt,
+    rc.rank_total_country_sent_cnt,
+    0 AS total_country_account_cnt,
+    NULL AS rank_total_country_account_cnt
+  FROM email_stats_base eb
+  JOIN country_totals_email ct 
+  ON eb.country = ct.country
+  JOIN ranked_country_email rc
+   ON eb.country = rc.country
+),
+
+-- 5. Połączenie i filtracja TOP 10
+
+ combined_stats AS (
+  SELECT
+    date,
+    country,
+    send_interval,
+    is_verified,
+    is_unsubscribed,
+    account_cnt,
+    sent_msg,
+    open_msg,
+    visit_msg,
+    total_country_account_cnt,
+    total_country_sent_cnt
+  FROM account_stats
+  UNION ALL
+  SELECT
+    date,
+    country,
+    send_interval,
+    is_verified,
+    is_unsubscribed,
+    account_cnt,
+    sent_msg,
+    open_msg,
+    visit_msg,
+    total_country_account_cnt,
+    total_country_sent_cnt
+  FROM email_stats
+),
+ranked_combined AS (
+  SELECT *,
+    RANK() OVER (ORDER BY total_country_account_cnt DESC) AS rank_total_country_account_cnt,
+    RANK() OVER (ORDER BY total_country_sent_cnt DESC) AS rank_total_country_sent_cnt
+  FROM combined_stats
+)
+
+
+SELECT * 
+FROM ranked_combined
+WHERE rank_total_country_account_cnt <= 10 OR rank_total_country_sent_cnt <= 10
