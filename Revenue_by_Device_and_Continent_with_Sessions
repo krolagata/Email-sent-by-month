@@ -1,0 +1,61 @@
+WITH revenue AS (
+  SELECT
+    sp.continent,
+    SUM(p.price) AS revenue_total,
+    SUM(CASE WHEN sp.device = 'mobile' THEN p.price ELSE 0 END) AS revenue_from_mobile,
+    SUM(CASE WHEN sp.device = 'desktop' THEN p.price ELSE 0 END) AS revenue_from_desktop
+  FROM `data-analytics-mate.DA.order` AS o
+  JOIN `data-analytics-mate.DA.product` AS p ON p.item_id = o.item_id
+  JOIN `data-analytics-mate.DA.session_params` AS sp ON sp.ga_session_id = o.ga_session_id
+  GROUP BY sp.continent
+),
+
+session AS (
+  SELECT
+    sp.continent,
+    COUNT(DISTINCT sp.ga_session_id) AS session_count
+  FROM `data-analytics-mate.DA.session_params` AS sp 
+  GROUP BY sp.continent
+),
+
+verified AS (
+  SELECT
+    sp.continent,
+    COUNT(DISTINCT a.id) AS account_count,
+    COUNT(DISTINCT CASE WHEN a.is_verified = 1 THEN a.id END) AS verified_account
+  FROM `data-analytics-mate.DA.account_session` AS acs
+  JOIN `data-analytics-mate.DA.session_params` AS sp ON acs.ga_session_id = sp.ga_session_id
+  JOIN `data-analytics-mate.DA.account` AS a ON acs.account_id = a.id
+  GROUP BY sp.continent
+),
+
+revenue_per_prc AS (
+  SELECT
+    continent,
+    revenue_total,
+    revenue_from_mobile,
+    revenue_from_desktop,
+    ROUND(
+      CASE WHEN SUM(revenue_total) OVER() = 0 THEN 0
+           ELSE revenue_total / SUM(revenue_total) OVER() * 100
+      END,
+      2
+    ) AS prc_revenue_from_total
+  FROM revenue
+)
+
+SELECT  
+
+  s.continent as Continent,
+  COALESCE(r.revenue_total, 0) AS Revenue,
+  COALESCE(r.revenue_from_mobile, 0) AS Revenue_from_mobile,
+  COALESCE(r.revenue_from_desktop, 0) AS Revenue_from_desktop,
+  COALESCE(r.prc_revenue_from_total, 0) AS prc_revenue_from_total,
+  COALESCE(v.account_count, 0) AS Account_count,
+  COALESCE(v.verified_account, 0) AS Verified_account,
+  s.session_count as Session_count
+FROM session AS s
+LEFT JOIN revenue_per_prc AS r ON s.continent = r.continent
+LEFT JOIN verified AS v ON s.continent = v.continent
+WHERE s.continent IS NOT NULL AND s.continent != '(not set)'
+ORDER BY s.continent
